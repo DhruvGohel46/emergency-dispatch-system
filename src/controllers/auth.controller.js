@@ -1,4 +1,81 @@
 const User = require("../models/User");
+const Driver = require("../models/Driver");
+const { generateToken } = require("../middleware/auth");
+
+/**
+ * Login user (phone-based)
+ */
+exports.login = async (req, res) => {
+  try {
+    const { phone, role = "user" } = req.body;
+
+    if (!phone) {
+      return res.status(400).json({
+        success: false,
+        message: "Phone number is required",
+      });
+    }
+
+    // Find user
+    let user = null;
+    if (role === "driver") {
+      user = await Driver.findOne({ phone });
+      if (!user) {
+        return res.status(404).json({
+          success: false,
+          message: "Driver not found. Please register first.",
+        });
+      }
+    } else {
+      user = await User.findOne({ phone });
+      if (!user) {
+        return res.status(404).json({
+          success: false,
+          message: "User not found. Please register first.",
+        });
+      }
+    }
+
+    // Generate JWT token
+    const tokenPayload = {
+      id: user._id.toString(),
+      phone: user.phone,
+      role: role === "driver" ? "driver" : user.role || "user",
+      ...(role === "driver" && { driverId: user._id.toString() }),
+    };
+
+    const token = generateToken(tokenPayload);
+
+    // Prepare response data
+    const responseData = {
+      id: user._id,
+      name: user.name,
+      phone: user.phone,
+      role: role === "driver" ? "driver" : user.role,
+      ...(role === "driver" && {
+        vehicleNo: user.vehicleNo,
+        status: user.status,
+        rating: user.rating,
+        trustScore: user.trustScore,
+        kycVerified: user.kycVerified,
+      }),
+    };
+
+    res.json({
+      success: true,
+      message: "Login successful",
+      token,
+      user: responseData,
+    });
+  } catch (error) {
+    console.error("❌ Login error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Login failed",
+      error: error.message,
+    });
+  }
+};
 
 /**
  * Register a new user
@@ -50,7 +127,7 @@ exports.register = async (req, res) => {
 };
 
 /**
- * Get user profile
+ * Get user profile (by phone)
  */
 exports.getProfile = async (req, res) => {
   try {
@@ -76,6 +153,74 @@ exports.getProfile = async (req, res) => {
     });
   } catch (error) {
     console.error("❌ Get profile error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to get profile",
+      error: error.message,
+    });
+  }
+};
+
+/**
+ * Get current user/driver profile (from token)
+ */
+exports.getCurrentProfile = async (req, res) => {
+  try {
+    const { id, role } = req.user;
+
+    if (role === "driver") {
+      const driver = await Driver.findById(id).select("-__v");
+      if (!driver) {
+        return res.status(404).json({
+          success: false,
+          message: "Driver not found",
+        });
+      }
+
+      return res.json({
+        success: true,
+        user: {
+          id: driver._id,
+          name: driver.name,
+          phone: driver.phone,
+          vehicleNo: driver.vehicleNo,
+          role: "driver",
+          lat: driver.lat,
+          lng: driver.lng,
+          status: driver.status,
+          rating: driver.rating,
+          totalTrips: driver.totalTrips,
+          totalCancellations: driver.totalCancellations,
+          totalBreakdowns: driver.totalBreakdowns,
+          kycVerified: driver.kycVerified,
+          hospitalAffiliation: driver.hospitalAffiliation,
+          trustScore: driver.trustScore,
+          lastSeen: driver.lastSeen,
+          createdAt: driver.createdAt,
+        },
+      });
+    } else {
+      const user = await User.findById(id).select("-__v");
+      if (!user) {
+        return res.status(404).json({
+          success: false,
+          message: "User not found",
+        });
+      }
+
+      return res.json({
+        success: true,
+        user: {
+          id: user._id,
+          name: user.name,
+          phone: user.phone,
+          role: user.role,
+          createdAt: user.createdAt,
+        },
+      });
+    }
+  } catch (error) {
+    console.error("❌ Get current profile error:", error);
     res.status(500).json({
       success: false,
       message: "Failed to get profile",

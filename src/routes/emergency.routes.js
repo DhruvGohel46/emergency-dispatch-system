@@ -5,8 +5,11 @@ const emergencyController = require("../controllers/emergency.controller");
 // Create emergency
 router.post("/create", emergencyController.createEmergency);
 
-// Get emergency by ID
+// Get emergency by ID (includes timeline, metrics, messages)
 router.get("/:id", emergencyController.getEmergency);
+
+// Get emergency timeline/events
+router.get("/:id/timeline", emergencyController.getTimeline);
 
 // Get emergencies by user phone
 router.get("/user/:phone", emergencyController.getUserEmergencies);

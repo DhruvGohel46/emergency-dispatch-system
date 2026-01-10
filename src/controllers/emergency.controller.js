@@ -1,5 +1,8 @@
 const Emergency = require("../models/Emergency");
 const dispatch = require("../services/dispatch.service");
+const eventLogger = require("../utils/eventLogger");
+const messageLogger = require("../utils/messageLogger");
+const EmergencyMetrics = require("../models/EmergencyMetrics");
 
 /**
  * Create a new emergency
@@ -60,14 +63,14 @@ exports.createEmergency = async (req, res) => {
 };
 
 /**
- * Get emergency by ID
+ * Get emergency by ID with timeline and metrics
  */
 exports.getEmergency = async (req, res) => {
   try {
     const { id } = req.params;
 
     const emergency = await Emergency.findById(id)
-      .populate("assignedDriverId", "name phone vehicleNo")
+      .populate("assignedDriverId", "name phone vehicleNo rating")
       .lean();
 
     if (!emergency) {
@@ -77,15 +80,60 @@ exports.getEmergency = async (req, res) => {
       });
     }
 
+    // Get timeline events
+    const timeline = await eventLogger.getTimeline(id);
+
+    // Get metrics
+    const metrics = await EmergencyMetrics.findOne({ emergencyId: id }).lean();
+
+    // Get communication history
+    const messages = await messageLogger.getHistory(id);
+
     res.json({
       success: true,
       emergency,
+      timeline,
+      metrics,
+      messages,
     });
   } catch (error) {
     console.error("❌ Get emergency error:", error);
     res.status(500).json({
       success: false,
       message: "Failed to get emergency",
+      error: error.message,
+    });
+  }
+};
+
+/**
+ * Get emergency timeline
+ */
+exports.getTimeline = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const emergency = await Emergency.findById(id);
+    if (!emergency) {
+      return res.status(404).json({
+        success: false,
+        message: "Emergency not found",
+      });
+    }
+
+    const timeline = await eventLogger.getTimeline(id);
+
+    res.json({
+      success: true,
+      emergencyId: id,
+      timeline,
+      count: timeline.length,
+    });
+  } catch (error) {
+    console.error("❌ Get timeline error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to get timeline",
       error: error.message,
     });
   }
@@ -125,7 +173,7 @@ exports.getUserEmergencies = async (req, res) => {
 exports.updateEmergencyStatus = async (req, res) => {
   try {
     const { id } = req.params;
-    const { status } = req.body;
+    const { status, reason } = req.body;
 
     const validStatuses = ["searching", "assigned", "enroute", "hospital", "failed", "completed"];
     if (!validStatuses.includes(status)) {
@@ -148,13 +196,54 @@ exports.updateEmergencyStatus = async (req, res) => {
       });
     }
 
-    // Emit status update via WebSocket
+    // Map status to event type
+    const eventTypeMap = {
+      searching: "CREATED",
+      assigned: "ASSIGNED",
+      enroute: "ENROUTE",
+      hospital: "HOSPITAL",
+      failed: "FAILED",
+      completed: "COMPLETED",
+    };
+
+    // Log event
+    await eventLogger.logEvent({
+      emergencyId: id,
+      type: eventTypeMap[status] || status.toUpperCase(),
+      actor: req.user?.role || "system",
+      actorId: req.user?.id || null,
+      message: reason || `Emergency status updated to ${status}`,
+      metadata: { status, reason },
+    });
+
+    // Update metrics if completed
+    if (status === "completed") {
+      const createdAt = new Date(emergency.createdAt);
+      const totalTime = Math.round((Date.now() - createdAt.getTime()) / 1000);
+      await EmergencyMetrics.findOneAndUpdate(
+        { emergencyId: id },
+        { success: true, totalTime },
+        { upsert: true }
+      );
+    }
+
+    // Emit status update via WebSocket (improved room management)
     const io = global.io || null;
     if (io) {
-      io.emit(`emergency:${id}:status`, {
+      io.to(`emergency:${id}`).emit(`emergency:${id}:status`, {
         status,
         emergencyId: id,
         timestamp: new Date().toISOString(),
+      });
+
+      // Log WebSocket message
+      await messageLogger.logMessage({
+        emergencyId: id,
+        from: "system",
+        to: "user",
+        channel: "socket",
+        message: `Emergency status updated to ${status}`,
+        status: "sent",
       });
     }
 
@@ -210,8 +299,25 @@ exports.transfer = async (req, res) => {
     emergency.assignedDriverId = null;
     await emergency.save();
 
+    // Log transfer event
+    await eventLogger.logEvent({
+      emergencyId,
+      type: "TRANSFERRED",
+      actor: req.user?.role || "system",
+      actorId: req.user?.id || null,
+      message: reason || "Emergency transfer requested",
+      metadata: { reason, previousDriverId: emergency.assignedDriverId },
+    });
+
+    // Update metrics
+    await EmergencyMetrics.findOneAndUpdate(
+      { emergencyId },
+      { $inc: { redispatchCount: 1 } },
+      { upsert: true }
+    );
+
     // Re-dispatch
-    const dispatchResult = await dispatch.start(emergency);
+    const dispatchResult = await dispatch.redispatch(emergencyId);
 
     res.json({
       success: true,

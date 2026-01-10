@@ -1,26 +1,30 @@
 const express = require("express");
 const router = express.Router();
 const driverController = require("../controllers/driver.controller");
+const { verifyDriver } = require("../middleware/auth");
+const { locationUpdateLimiter } = require("../middleware/rateLimiter");
 
-// Register driver
+// Public routes (no auth required)
 router.post("/register", driverController.register);
 
-// Update driver location
-router.post("/location", driverController.updateLocation);
+// Protected routes (JWT required)
+// Rate-limited location updates (3 seconds minimum between updates)
+router.post("/location", verifyDriver, locationUpdateLimiter, driverController.updateLocation);
 
-// Update driver status
-router.post("/status", driverController.updateStatus);
+// Driver status updates (auth required)
+router.post("/status", verifyDriver, driverController.updateStatus);
 
-// Accept emergency assignment
-router.post("/accept", driverController.accept);
+// Accept/reject assignments (auth required)
+router.post("/accept", verifyDriver, driverController.accept);
+router.post("/reject", verifyDriver, driverController.reject);
 
-// Reject emergency assignment
-router.post("/reject", driverController.reject);
+// Get current driver profile (auth required) - MUST be before /:driverId route
+router.get("/me", verifyDriver, driverController.getCurrentDriverProfile);
 
-// Get driver assignments
-router.get("/:driverId/assignments", driverController.getAssignments);
+// Get driver assignments (auth required)
+router.get("/:driverId/assignments", verifyDriver, driverController.getAssignments);
 
-// Get driver profile
+// Get driver profile by ID (public) - MUST be last
 router.get("/:driverId", driverController.getProfile);
 
 module.exports = router;

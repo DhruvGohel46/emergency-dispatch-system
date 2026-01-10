@@ -36,6 +36,40 @@ const driverSchema = new mongoose.Schema({
     type: Date,
     default: Date.now,
   },
+  // Trust & Rating System
+  rating: {
+    type: Number,
+    default: 5.0,
+    min: 0,
+    max: 5,
+  },
+  totalTrips: {
+    type: Number,
+    default: 0,
+  },
+  totalCancellations: {
+    type: Number,
+    default: 0,
+  },
+  totalBreakdowns: {
+    type: Number,
+    default: 0,
+  },
+  kycVerified: {
+    type: Boolean,
+    default: false,
+  },
+  hospitalAffiliation: {
+    type: String,
+    trim: true,
+    default: null,
+  },
+  trustScore: {
+    type: Number,
+    default: 100,
+    min: 0,
+    max: 100,
+  },
 }, {
   timestamps: true,
 });

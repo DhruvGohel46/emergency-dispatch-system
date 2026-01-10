@@ -1,9 +1,14 @@
 const Assignment = require("../models/Assignment");
 const Driver = require("../models/Driver");
 const Emergency = require("../models/Emergency");
+const EmergencyMetrics = require("../models/EmergencyMetrics");
 const geo = require("../services/geo.service");
 const sms = require("../services/sms.service");
 const routing = require("../services/routing.service");
+const dispatch = require("../services/dispatch.service");
+const eventLogger = require("../utils/eventLogger");
+const messageLogger = require("../utils/messageLogger");
+
 // Get io instance from global or app locals
 const getIO = () => {
   return global.io || null;
@@ -64,20 +69,23 @@ exports.register = async (req, res) => {
 };
 
 /**
- * Update driver location
+ * Update driver location (with rate limiting)
  */
 exports.updateLocation = async (req, res) => {
   try {
-    const { driverId, lat, lng } = req.body;
+    const { driverId, lat, lng, emergencyId } = req.body;
 
-    if (!driverId || lat === undefined || lng === undefined) {
+    // Use driverId from auth middleware if available
+    const actualDriverId = req.driverId || driverId;
+
+    if (!actualDriverId || lat === undefined || lng === undefined) {
       return res.status(400).json({
         success: false,
         message: "Driver ID, latitude, and longitude are required",
       });
     }
 
-    const driver = await geo.updateDriverLocation(driverId, lat, lng);
+    const driver = await geo.updateDriverLocation(actualDriverId, lat, lng);
 
     if (!driver) {
       return res.status(404).json({
@@ -86,15 +94,37 @@ exports.updateLocation = async (req, res) => {
       });
     }
 
-    // Emit location update via WebSocket
+    // Emit location update via WebSocket (improved room management)
     const io = getIO();
     if (io) {
-      io.emit(`driver:${driverId}:location`, {
-        driverId,
+      // Emit to driver's own room
+      io.to(`driver:${actualDriverId}`).emit(`driver:${actualDriverId}:location`, {
+        driverId: actualDriverId,
         lat,
         lng,
         timestamp: new Date().toISOString(),
       });
+
+      // If tracking an emergency, emit to emergency room
+      if (emergencyId) {
+        io.to(`emergency:${emergencyId}`).emit(`track:${emergencyId}`, {
+          driverId: actualDriverId,
+          lat,
+          lng,
+          timestamp: new Date().toISOString(),
+        });
+
+        // Log WebSocket message
+        await messageLogger.logMessage({
+          emergencyId,
+          driverId: actualDriverId,
+          from: "driver",
+          to: "user",
+          channel: "socket",
+          message: `Driver location updated: ${lat}, ${lng}`,
+          status: "sent",
+        });
+      }
     }
 
     res.json({
@@ -207,10 +237,23 @@ exports.accept = async (req, res) => {
       });
     }
 
+    // Cancel auto-redispatch timer
+    dispatch.cancelAutoRedispatch(emergencyId);
+
     // Update assignment status
     assignment.status = "accepted";
     assignment.acceptedAt = new Date();
     await assignment.save();
+
+    // Log acceptance event
+    await eventLogger.logEvent({
+      emergencyId,
+      type: "ACCEPTED",
+      actor: "driver",
+      actorId: driverId,
+      actorModel: "Driver",
+      message: "Driver accepted emergency assignment",
+    });
 
     // Update emergency status and assign driver
     const emergency = await Emergency.findByIdAndUpdate(
@@ -225,8 +268,17 @@ exports.accept = async (req, res) => {
     // Update driver status to busy
     await Driver.findByIdAndUpdate(driverId, { status: "busy" });
 
+    // Calculate response time (time from dispatch to acceptance)
+    const assignmentCreatedAt = new Date(assignment.createdAt);
+    const responseTime = Math.round((Date.now() - assignmentCreatedAt.getTime()) / 1000);
+    await EmergencyMetrics.findOneAndUpdate(
+      { emergencyId },
+      { responseTime },
+      { upsert: true }
+    );
+
     // Reject all other pending assignments for this emergency
-    await Assignment.updateMany(
+    const rejectedAssignments = await Assignment.updateMany(
       {
         emergencyId,
         driverId: { $ne: driverId },
@@ -238,6 +290,26 @@ exports.accept = async (req, res) => {
         reason: "Another driver accepted",
       }
     );
+
+    // Log rejection events for other drivers
+    if (rejectedAssignments.modifiedCount > 0) {
+      const rejectedDrivers = await Assignment.find({
+        emergencyId,
+        status: "rejected",
+        rejectedAt: { $gte: new Date(Date.now() - 5000) }, // Last 5 seconds
+      }).select("driverId");
+
+      for (const rejectedAssignment of rejectedDrivers) {
+        await eventLogger.logEvent({
+          emergencyId,
+          type: "REJECTED",
+          actor: "system",
+          actorId: rejectedAssignment.driverId,
+          actorModel: "Driver",
+          message: "Assignment rejected - another driver accepted",
+        });
+      }
+    }
 
     // Get ETA for user notification
     const driver = await Driver.findById(driverId);
@@ -252,16 +324,31 @@ exports.accept = async (req, res) => {
         );
 
         // Send SMS confirmation to user
-        await sms.sendUserConfirmation(emergency.userPhone, driver, eta);
+        const smsResult = await sms.sendUserConfirmation(emergency.userPhone, driver, eta);
+        
+        // Log SMS message
+        if (smsResult.success) {
+          await messageLogger.logMessage({
+            emergencyId,
+            from: "system",
+            to: "user",
+            channel: "sms",
+            message: `Ambulance dispatched! Driver: ${driver.name}, ETA: ${eta.estimatedMinutes} minutes`,
+            status: "sent",
+            provider: smsResult.provider || "unknown",
+            providerId: smsResult.messageId || null,
+          });
+        }
       } catch (error) {
         console.error("⚠️  ETA calculation or SMS failed:", error.message);
       }
     }
 
-    // Emit acceptance via WebSocket
+    // Emit acceptance via WebSocket (improved room management)
     const io = getIO();
     if (io) {
-      io.emit(`emergency:${emergencyId}:assigned`, {
+      // Emit to emergency-specific room
+      io.to(`emergency:${emergencyId}`).emit(`emergency:${emergencyId}:assigned`, {
         driverId,
         driver: {
           name: driver.name,
@@ -270,6 +357,17 @@ exports.accept = async (req, res) => {
         },
         eta,
         timestamp: new Date().toISOString(),
+      });
+
+      // Log WebSocket message
+      await messageLogger.logMessage({
+        emergencyId,
+        driverId,
+        from: "system",
+        to: "user",
+        channel: "socket",
+        message: `Ambulance assigned: ${driver.name} (${driver.vehicleNo})`,
+        status: "sent",
       });
     }
 
@@ -305,7 +403,10 @@ exports.reject = async (req, res) => {
   try {
     const { driverId, emergencyId, reason } = req.body;
 
-    if (!driverId || !emergencyId) {
+    // Use driverId from auth middleware if available
+    const actualDriverId = req.driverId || driverId;
+
+    if (!actualDriverId || !emergencyId) {
       return res.status(400).json({
         success: false,
         message: "Driver ID and Emergency ID are required",
@@ -314,7 +415,7 @@ exports.reject = async (req, res) => {
 
     const assignment = await Assignment.findOneAndUpdate(
       {
-        driverId,
+        driverId: actualDriverId,
         emergencyId,
         status: "pending",
       },
@@ -332,6 +433,22 @@ exports.reject = async (req, res) => {
         message: "No pending assignment found",
       });
     }
+
+    // Log rejection event
+    await eventLogger.logEvent({
+      emergencyId,
+      type: "REJECTED",
+      actor: "driver",
+      actorId: actualDriverId,
+      actorModel: "Driver",
+      message: reason || "Driver rejected assignment",
+    });
+
+    // Update driver cancellation count
+    await Driver.findByIdAndUpdate(
+      actualDriverId,
+      { $inc: { totalCancellations: 1 } }
+    );
 
     res.json({
       success: true,
@@ -377,13 +494,13 @@ exports.getAssignments = async (req, res) => {
 };
 
 /**
- * Get driver profile
+ * Get driver profile (with all details)
  */
 exports.getProfile = async (req, res) => {
   try {
     const { driverId } = req.params;
 
-    const driver = await Driver.findById(driverId);
+    const driver = await Driver.findById(driverId).select("-__v");
 
     if (!driver) {
       return res.status(404).json({
@@ -391,6 +508,23 @@ exports.getProfile = async (req, res) => {
         message: "Driver not found",
       });
     }
+
+    // Get driver statistics
+    const Assignment = require("../models/Assignment");
+    const stats = await Assignment.aggregate([
+      { $match: { driverId: driver._id } },
+      {
+        $group: {
+          _id: "$status",
+          count: { $sum: 1 },
+        },
+      },
+    ]);
+
+    const assignmentStats = stats.reduce((acc, stat) => {
+      acc[stat._id] = stat.count;
+      return acc;
+    }, {});
 
     res.json({
       success: true,
@@ -402,12 +536,95 @@ exports.getProfile = async (req, res) => {
         lat: driver.lat,
         lng: driver.lng,
         status: driver.status,
+        rating: driver.rating,
+        totalTrips: driver.totalTrips,
+        totalCancellations: driver.totalCancellations,
+        totalBreakdowns: driver.totalBreakdowns,
+        kycVerified: driver.kycVerified,
+        hospitalAffiliation: driver.hospitalAffiliation,
+        trustScore: driver.trustScore,
         lastSeen: driver.lastSeen,
         createdAt: driver.createdAt,
+        updatedAt: driver.updatedAt,
+      },
+      statistics: {
+        assignments: assignmentStats,
+        totalTrips: driver.totalTrips,
+        cancellationRate: driver.totalTrips > 0 
+          ? ((driver.totalCancellations / driver.totalTrips) * 100).toFixed(2) + "%"
+          : "0%",
       },
     });
   } catch (error) {
     console.error("❌ Get driver profile error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to get driver profile",
+      error: error.message,
+    });
+  }
+};
+
+/**
+ * Get current driver profile (from token)
+ */
+exports.getCurrentDriverProfile = async (req, res) => {
+  try {
+    const driverId = req.driverId || req.user.id;
+
+    const driver = await Driver.findById(driverId).select("-__v");
+
+    if (!driver) {
+      return res.status(404).json({
+        success: false,
+        message: "Driver not found",
+      });
+    }
+
+    // Get driver statistics
+    const Assignment = require("../models/Assignment");
+    const totalAssignments = await Assignment.countDocuments({ driverId: driver._id });
+    const pendingAssignments = await Assignment.countDocuments({ 
+      driverId: driver._id, 
+      status: "pending" 
+    });
+    const completedAssignments = await Assignment.countDocuments({ 
+      driverId: driver._id, 
+      status: "completed" 
+    });
+
+    res.json({
+      success: true,
+      driver: {
+        id: driver._id,
+        name: driver.name,
+        phone: driver.phone,
+        vehicleNo: driver.vehicleNo,
+        lat: driver.lat,
+        lng: driver.lng,
+        status: driver.status,
+        rating: driver.rating,
+        totalTrips: driver.totalTrips,
+        totalCancellations: driver.totalCancellations,
+        totalBreakdowns: driver.totalBreakdowns,
+        kycVerified: driver.kycVerified,
+        hospitalAffiliation: driver.hospitalAffiliation,
+        trustScore: driver.trustScore,
+        lastSeen: driver.lastSeen,
+        createdAt: driver.createdAt,
+        updatedAt: driver.updatedAt,
+      },
+      statistics: {
+        totalAssignments,
+        pendingAssignments,
+        completedAssignments,
+        cancellationRate: driver.totalTrips > 0 
+          ? ((driver.totalCancellations / driver.totalTrips) * 100).toFixed(2) + "%"
+          : "0%",
+      },
+    });
+  } catch (error) {
+    console.error("❌ Get current driver profile error:", error);
     res.status(500).json({
       success: false,
       message: "Failed to get driver profile",
