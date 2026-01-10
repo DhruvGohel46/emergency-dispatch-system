@@ -13,7 +13,7 @@ module.exports = {
   REDIS_PASSWORD: process.env.REDIS_PASSWORD || "",
   
   // JWT
-  JWT_SECRET: process.env.JWT_SECRET || "your-secret-key-change-in-production",
+  JWT_SECRET: process.env.JWT_SECRET || "yayaya",
   JWT_EXPIRE: process.env.JWT_EXPIRE || "7d",
   
   // SMS Gateway (Twilio)
