@@ -157,7 +157,7 @@ npm start
 # 4. Launch Offline Simulation (No Internet)
 # Open http://localhost:3000/citizen.html to trigger SOS via simulated GSM
 ```
-
+The given repo is Extension of this Repo Featuring Offline DSM-SMS system : https://github.com/Ahad-Dngwala/SAHAAY.github.io
 ---
 
 ## 🏆 Project Status
