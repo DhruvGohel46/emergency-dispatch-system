@@ -2,10 +2,10 @@
   "name": "ambulance-dispatch-backend",
   "version": "1.0.0",
   "description": "Distributed Ambulance Dispatch Platform Backend - Production Ready Emergency System",
-  "main": "src/server.js",
+  "main": "backend/server.js",
   "scripts": {
-    "start": "node src/server.js",
-    "dev": "nodemon src/server.js",
+    "start": "node backend/server.js",
+    "dev": "nodemon backend/server.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [

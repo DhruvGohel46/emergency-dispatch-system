@@ -737,3 +737,19 @@ exports.getCurrentDriverProfile = async (req, res) => {
     });
   }
 };
+
+/**
+ * Get all drivers (Admin)
+ */
+exports.getAllDrivers = async (req, res) => {
+  try {
+    const drivers = await Driver.find().select("-__v").sort({ name: 1 }).lean();
+    res.json({
+      success: true,
+      count: drivers.length,
+      drivers,
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, message: "Failed to fetch drivers" });
+  }
+};

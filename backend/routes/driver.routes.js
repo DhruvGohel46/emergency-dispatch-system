@@ -27,6 +27,9 @@ router.get("/me/assignments", verifyDriver, driverController.getMyAssignments);
 // Get driver assignments by ID (auth required - for admin access)
 router.get("/:driverId/assignments", verifyDriver, driverController.getAssignments);
 
+// Admin: Get all drivers
+router.get("/admin/all", verifyDriver, driverController.getAllDrivers);
+
 // Get driver profile by ID (public) - MUST be last
 router.get("/:driverId", driverController.getProfile);
 

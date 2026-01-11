@@ -1,38 +1,58 @@
-// All backend API calls in ONE file with comments
-const API_BASE = 'http://localhost:3000/api'; // Change to your backend
+// All backend API calls using axios
+import axios from 'axios';
+
+const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:3000';
+
+const api = axios.create({
+  baseURL: API_BASE,
+  headers: {
+    'Content-Type': 'application/json',
+  },
+});
+
+// Add token to requests
+api.interceptors.request.use((config) => {
+  const token = localStorage.getItem('token');
+  if (token) {
+    config.headers.Authorization = `Bearer ${token}`;
+  }
+  return config;
+});
 
 export const emergencyAPI = {
-  // Trigger emergency SOS via SMS
-  sendEmergency: async (payload) => fetch(`${API_BASE}/emergency`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
-  }),
+  // Trigger emergency SOS
+  sendEmergency: async (payload) => api.post('/api/emergency', payload),
 
-  // Cancel emergency within 30s Gearo window
-  cancelEmergency: async (missionId) => fetch(`${API_BASE}/emergency/${missionId}/cancel`, {
-    method: 'POST'
-  }),
+  // Get user's emergency history - uses GET /api/emergency/user/:phone
+  getHistory: async (phone) => api.get(`/api/emergency/user/${phone}`),
 
-  // Get user's emergency history
-  getHistory: async () => fetch(`${API_BASE}/emergency/history`),
+  // Get emergency details
+  getEmergency: async (emergencyId) => api.get(`/api/emergency/${emergencyId}`),
 
-  // Gearo auto-accident detection trigger
-  gearoAccident: async (data) => fetch(`${API_BASE}/emergency/gearo-accident`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(data),
-  }),
+  // Update emergency status
+  updateStatus: async (emergencyId, status) => 
+    api.patch(`/api/emergency/${emergencyId}/status`, { status }),
+
+  // Send message in emergency
+  sendMessage: async (emergencyId, message) => 
+    api.post(`/api/emergency/${emergencyId}/message`, { message }),
 };
 
 export const userAPI = {
-  // Fetch current user profile
-  getProfile: async () => fetch(`${API_BASE}/user/profile`),
+  // Get current user (requires token)
+  getCurrentUser: async () => api.get('/api/auth/me'),
 
-  // Update user emergency contacts
-  updateProfile: async (data) => fetch(`${API_BASE}/user/profile`, {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(data),
-  }),
+  // Get user profile by phone
+  getProfile: async (phone) => api.get(`/api/auth/profile/${phone}`),
+
+  // Login user
+  login: async (phone, role = 'user') => 
+    api.post('/api/auth/login', { phone, role }),
+
+  // Register user
+  register: async (name, phone) => 
+    api.post('/api/auth/register', { name, phone, role: 'user' }),
 };
+
+export default api;
+

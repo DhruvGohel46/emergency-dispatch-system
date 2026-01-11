@@ -20,7 +20,7 @@ const emergencySchema = new mongoose.Schema({
   },
   status: {
     type: String,
-    enum: ["searching", "assigned", "enroute", "hospital", "failed", "completed"],
+    enum: ["searching", "assigned", "reached", "enroute", "hospital", "failed", "completed"],
     default: "searching",
   },
   assignedDriverId: {
@@ -31,6 +31,14 @@ const emergencySchema = new mongoose.Schema({
   notes: {
     type: String,
     trim: true,
+  },
+  currentRadius: {
+    type: Number,
+    default: 500,
+  },
+  searchRadius: {
+    type: Number,
+    default: 500,
   },
 }, {
   timestamps: true,

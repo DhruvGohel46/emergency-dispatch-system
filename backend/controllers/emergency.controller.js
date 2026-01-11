@@ -175,7 +175,7 @@ exports.updateEmergencyStatus = async (req, res) => {
     const { id } = req.params;
     const { status, reason } = req.body;
 
-    const validStatuses = ["searching", "assigned", "enroute", "hospital", "failed", "completed"];
+    const validStatuses = ["searching", "assigned", "reached", "enroute", "hospital", "failed", "completed"];
     if (!validStatuses.includes(status)) {
       return res.status(400).json({
         success: false,
@@ -355,12 +355,14 @@ exports.transfer = async (req, res) => {
     const originalLat = emergency.lat;
     const originalLng = emergency.lng;
 
-    // Update emergency location to current ambulance position (if different)
-    if (newLat !== originalLat || newLng !== originalLng) {
+    // Update emergency location to current ambulance position ONLY if patient is on board (enroute)
+    if (emergency.status === "enroute" && (newLat !== originalLat || newLng !== originalLng)) {
       emergency.lat = newLat;
       emergency.lng = newLng;
-      emergency.notes = `${emergency.notes || ""}\n[TRANSFER] ${reason || "No reason provided"} - Location updated to ambulance's current position: ${newLat}, ${newLng}`.trim();
-      console.log(`✅ Emergency location updated from (${originalLat}, ${originalLng}) to (${newLat}, ${newLng})`);
+      emergency.notes = `${emergency.notes || ""}\n[TRANSFER-MID-ROUTE] ${reason || "No reason provided"} - Location updated to ambulance's current position: ${newLat}, ${newLng}`.trim();
+      console.log(`✅ Emergency location updated to ambulance's current breakdown position (${newLat}, ${newLng}) because patient is on board.`);
+    } else {
+      console.log(`ℹ️  Transfer: Patient NOT on board, keeping original emergency location for re-dispatch.`);
     }
 
     // Reset emergency status
@@ -416,5 +418,114 @@ exports.transfer = async (req, res) => {
       message: "Failed to transfer emergency",
       error: error.message,
     });
+  }
+};
+
+/**
+ * Add message to emergency chat
+ */
+exports.addMessage = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { message } = req.body;
+    const { role, id: actorId } = req.user;
+
+    if (!message) {
+      return res.status(400).json({ success: false, message: "Message is required" });
+    }
+
+    const emergency = await Emergency.findById(id);
+    if (!emergency) {
+      return res.status(404).json({ success: false, message: "Emergency not found" });
+    }
+
+    // Determine sender and receiver
+    const from = role;
+    const to = role === "user" ? "driver" : "user";
+
+    // Log message
+    await messageLogger.logMessage({
+      emergencyId: id,
+      driverId: role === "driver" ? actorId : emergency.assignedDriverId,
+      userId: role === "user" ? actorId : null,
+      from,
+      to,
+      channel: "socket",
+      message,
+    });
+
+    // Emit via socket
+    const io = global.io;
+    if (io) {
+      io.to(`emergency:${id}`).emit(`message:${id}`, {
+        from,
+        message,
+        timestamp: new Date().toISOString(),
+      });
+    }
+
+    res.json({ success: true, message: "Message sent" });
+  } catch (error) {
+    console.error("❌ Add message error:", error);
+    res.status(500).json({ success: false, message: "Failed to send message" });
+  }
+};
+
+/**
+ * Get all emergencies (Admin)
+ */
+exports.getAllEmergencies = async (req, res) => {
+  try {
+    const emergencies = await Emergency.find()
+      .populate("assignedDriverId", "name phone vehicleNo")
+      .sort({ createdAt: -1 })
+      .limit(100)
+      .lean();
+
+    res.json({
+      success: true,
+      count: emergencies.length,
+      emergencies,
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, message: "Failed to fetch emergencies" });
+  }
+};
+
+/**
+ * Get Admin Dashboard Stats
+ */
+exports.getAdminStats = async (req, res) => {
+  try {
+    const activeEmergencies = await Emergency.countDocuments({
+      status: { $in: ["searching", "assigned", "reached", "enroute"] },
+    });
+
+    const Driver = require("../models/Driver");
+    const availableDrivers = await Driver.countDocuments({ status: "available" });
+
+    const metrics = await EmergencyMetrics.aggregate([
+      {
+        $group: {
+          _id: null,
+          avgResponseTime: { $avg: "$responseTime" },
+          successRate: {
+            $avg: { $cond: [{ $eq: ["$success", true] }, 100, 0] }
+          }
+        }
+      }
+    ]);
+
+    res.json({
+      success: true,
+      metrics: {
+        activeEmergencies,
+        availableDrivers,
+        avgResponseTime: metrics[0]?.avgResponseTime || 0,
+        successRate: metrics[0]?.successRate || 0,
+      }
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, message: "Failed to fetch stats" });
   }
 };

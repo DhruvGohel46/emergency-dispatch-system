@@ -36,71 +36,53 @@ exports.start = async (emergency) => {
     });
 
     // Initialize metrics
-    await EmergencyMetrics.create({
-      emergencyId,
-      dispatchTime: 0,
-      success: false,
-    });
+    await EmergencyMetrics.findOneAndUpdate(
+      { emergencyId },
+      { dispatchTime: 0, success: false },
+      { upsert: true }
+    );
 
-    // Update emergency status to searching
+    // Update emergency status to searching if not already
+    const radius = emergency.searchRadius || 500;
     await Emergency.findByIdAndUpdate(emergencyId, {
       status: "searching",
+      searchRadius: radius,
     });
 
-    // First, search within 500m radius
-    let drivers = await geo.findDrivers(emergency.lat, emergency.lng, 500);
+    // Search within current radius (starts at 500m)
+    let drivers = await geo.findDrivers(emergency.lat, emergency.lng, radius);
 
-    // If no drivers found, expand to 1km
-    if (drivers.length === 0) {
-      console.log(`⚠️  No drivers found within 500m. Expanding search to 1km...`);
+    // If no drivers found AND radius is still 500m, expand immediately to 1km
+    if (drivers.length === 0 && radius === 500) {
+      console.log(`⚠️  No drivers found within 500m. Expanding search to 1km immediately...`);
       await eventLogger.logEvent({
         emergencyId,
         type: "REDISPATCHED",
         actor: "system",
         message: "No drivers within 500m, expanding search radius to 1km",
       });
+      await Emergency.findByIdAndUpdate(emergencyId, { searchRadius: 1000 });
       drivers = await geo.findDrivers(emergency.lat, emergency.lng, 1000);
     }
 
     if (drivers.length === 0) {
-      // No drivers available at all
+      // No drivers available even at 1km
       await Emergency.findByIdAndUpdate(emergencyId, {
         status: "failed",
       });
 
-      // Log failure event
       await eventLogger.logEvent({
         emergencyId,
         type: "FAILED",
         actor: "system",
-        message: "No drivers available in the area",
+        message: "No drivers available within 1km",
       });
 
-      // Update metrics
-      await EmergencyMetrics.findOneAndUpdate(
-        { emergencyId },
-        {
-          dispatchTime: Math.round((Date.now() - startTime) / 1000),
-          success: false,
-        }
-      );
-
-      // Emit failure event via WebSocket
       const io = getIO();
       if (io) {
         io.to(`emergency:${emergencyId}`).emit(`emergency:${emergencyId}:failed`, {
-          message: "No drivers available",
+          message: "No drivers available in your vicinity",
           emergencyId,
-        });
-
-        // Log WebSocket message
-        await messageLogger.logMessage({
-          emergencyId,
-          from: "system",
-          to: "user",
-          channel: "socket",
-          message: "No drivers available in the area",
-          status: "sent",
         });
       }
 
@@ -111,54 +93,15 @@ exports.start = async (emergency) => {
       };
     }
 
-    // Calculate dispatch time
-    const dispatchTime = Math.round((Date.now() - startTime) / 1000);
-    await EmergencyMetrics.findOneAndUpdate(
-      { emergencyId },
-      { dispatchTime },
-      { upsert: true }
-    );
-
-    // Log dispatch event
-    await eventLogger.logEvent({
-      emergencyId,
-      type: "ASSIGNED",
-      actor: "system",
-      message: `Dispatched to ${drivers.length} driver(s) within ${drivers[0].distance}m`,
-      metadata: { driverCount: drivers.length, distances: drivers.map((d) => d.distance) },
-    });
-
-    // Send dispatch requests to all nearby drivers
-    const dispatchRequests = drivers.map((driver) => ({
-      driverId: driver._id,
-      driverName: driver.name,
-      vehicleNo: driver.vehicleNo,
-      distance: driver.distance,
-      emergencyId,
-      emergency: {
-        lat: emergency.lat,
-        lng: emergency.lng,
-        userPhone: emergency.userPhone,
-      },
-    }));
-
-    // Emit dispatch request to drivers via WebSocket (improved room management)
+    // Emit dispatch request to drivers
     const io = getIO();
     if (io) {
       drivers.forEach(async (driver) => {
-        // Emit to driver-specific room AND emergency room
         io.to(`driver:${driver._id}`).emit(`driver:${driver._id}:request`, {
           emergencyId,
           lat: emergency.lat,
           lng: emergency.lng,
           userPhone: emergency.userPhone,
-          distance: driver.distance,
-        });
-
-        // Also emit to emergency room for tracking
-        io.to(`emergency:${emergencyId}`).emit(`emergency:${emergencyId}:dispatch`, {
-          driverId: driver._id,
-          driverName: driver.name,
           distance: driver.distance,
         });
 
@@ -169,98 +112,61 @@ exports.start = async (emergency) => {
           from: "system",
           to: "driver",
           channel: "socket",
-          message: `Emergency dispatch request - ${driver.distance}m away`,
+          message: `Emergency dispatch request - ${driver.distance}m away (Radius: ${radius}m)`,
           status: "sent",
-          metadata: { distance: driver.distance },
         });
 
-        // Send SMS notification if configured
+        // Send SMS Backup
         try {
-          const smsResult = await smsService.sendDispatchNotification(driver.phone, emergency);
-          if (smsResult.success) {
-            await messageLogger.logMessage({
-              emergencyId,
-              driverId: driver._id,
-              from: "system",
-              to: "driver",
-              channel: "sms",
-              message: `Emergency alert at ${emergency.lat}, ${emergency.lng}`,
-              status: "sent",
-              provider: smsResult.provider || "unknown",
-              providerId: smsResult.messageId || null,
-            });
-          }
-        } catch (smsError) {
-          console.error(`⚠️  SMS notification failed for driver ${driver._id}:`, smsError.message);
-        }
+          await smsService.sendDispatchNotification(driver.phone, emergency);
+        } catch (e) { }
       });
     }
 
-    // Create pending assignments for each driver
+    // Create pending assignments
     const assignments = await Promise.all(
       drivers.map((driver) =>
-        Assignment.create({
-          emergencyId,
-          driverId: driver._id,
-          status: "pending",
-        })
+        Assignment.findOneAndUpdate(
+          { emergencyId, driverId: driver._id },
+          { status: "pending", createdAt: new Date() },
+          { upsert: true, new: true }
+        )
       )
     );
 
-    console.log(`✅ Dispatch requests sent to ${drivers.length} driver(s)`);
-    drivers.forEach((d) => {
-      console.log(`   → Request sent to ${d.name} (${d.vehicleNo}) - ${d.distance}m away`);
-    });
-
-    // 🔥 AUTO-REDISPATCH TIMER: If no driver accepts in 2 minutes, auto-redispatch
-    // Clear any existing timer for this emergency
+    // 🔥 AUTO-REDISPATCH TIMER (2 Minutes)
     if (activeTimers.has(emergencyId)) {
       clearTimeout(activeTimers.get(emergencyId));
     }
 
     const autoRedispatchTimer = setTimeout(async () => {
       try {
-        // Check if any assignment is still pending
-        const stillPending = await Assignment.findOne({
-          emergencyId,
-          status: "pending",
-        });
+        const currentEmergency = await Emergency.findById(emergencyId);
+        if (currentEmergency && currentEmergency.status === "searching") {
+          const currentRadius = currentEmergency.searchRadius || 500;
 
-        if (stillPending) {
-          console.log(`⏰ Auto-redispatch triggered for emergency ${emergencyId} (2 min timeout)`);
-          await eventLogger.logEvent({
-            emergencyId,
-            type: "REDISPATCHED",
-            actor: "system",
-            message: "Auto-redispatch: No driver accepted within 2 minutes",
-          });
-
-          // Update metrics
-          await EmergencyMetrics.findOneAndUpdate(
-            { emergencyId },
-            { $inc: { redispatchCount: 1 } }
-          );
-
-          // Redispatch with expanded radius
-          await exports.redispatch(emergencyId);
+          if (currentRadius < 1000) {
+            console.log(`⏰ 2 minute timeout: Expanding radius to 1km for emergency ${emergencyId}`);
+            await Emergency.findByIdAndUpdate(emergencyId, { searchRadius: 1000 });
+            await exports.redispatch(emergencyId);
+          } else {
+            console.log(`⏰ 2 minute timeout: No drivers accepted even at 1km for ${emergencyId}`);
+            await exports.failEmergency(emergencyId);
+          }
         }
-
-        // Clean up timer
         activeTimers.delete(emergencyId);
       } catch (error) {
-        console.error("❌ Auto-redispatch error:", error);
         activeTimers.delete(emergencyId);
       }
-    }, 120000); // 2 minutes = 120000ms
+    }, 120000); // 2 minutes
 
     activeTimers.set(emergencyId, autoRedispatchTimer);
 
     return {
       success: true,
-      message: `Dispatched to ${drivers.length} driver(s)`,
-      drivers: dispatchRequests,
+      message: `Dispatched to ${drivers.length} drivers`,
+      drivers,
       assignments,
-      autoRedispatchIn: 120, // seconds
     };
   } catch (error) {
     console.error("❌ Dispatch error:", error);
@@ -345,5 +251,27 @@ exports.cancelAutoRedispatch = (emergencyId) => {
     clearTimeout(activeTimers.get(emergencyId.toString()));
     activeTimers.delete(emergencyId.toString());
     console.log(`✅ Auto-redispatch timer cancelled for emergency ${emergencyId}`);
+  }
+};
+
+/**
+ * Handle emergency failure (no drivers found)
+ * @param {string} emergencyId 
+ */
+exports.failEmergency = async (emergencyId) => {
+  await Emergency.findByIdAndUpdate(emergencyId, { status: "failed" });
+  await eventLogger.logEvent({
+    emergencyId,
+    type: "FAILED",
+    actor: "system",
+    message: "Emergency failed: No drivers available after 1km expansion and timeout",
+  });
+
+  const io = getIO();
+  if (io) {
+    io.to(`emergency:${emergencyId}`).emit(`emergency:${emergencyId}:failed`, {
+      message: "We're sorry, no ambulances are available at the moment.",
+      emergencyId,
+    });
   }
 };

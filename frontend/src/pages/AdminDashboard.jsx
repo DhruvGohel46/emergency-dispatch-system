@@ -8,6 +8,7 @@ export default function AdminDashboard() {
   const navigate = useNavigate();
   const [emergencies, setEmergencies] = useState([]);
   const [drivers, setDrivers] = useState([]);
+  const [loading, setLoading] = useState(true);
   const [metrics, setMetrics] = useState({
     activeEmergencies: 0,
     availableDrivers: 0,
@@ -20,45 +21,34 @@ export default function AdminDashboard() {
   useEffect(() => {
     loadDashboardData();
     const interval = setInterval(loadDashboardData, 5000); // Refresh every 5 seconds
-    
+
     return () => clearInterval(interval);
   }, []);
 
   const loadDashboardData = async () => {
     try {
-      // Note: You'll need to add these endpoints to backend for admin dashboard
-      // For now, using placeholder data
-      
-      // Load active emergencies - TODO: Add admin endpoint
-      try {
-        const emergenciesResponse = await api.get('/api/emergency/user/+1234567890');
-        if (emergenciesResponse.data.success) {
-          const allEmergencies = emergenciesResponse.data.emergencies || [];
-          setEmergencies(allEmergencies);
-          
-          // Calculate metrics
-          const activeEmergencies = allEmergencies.filter(e => 
-            ['searching', 'assigned', 'enroute'].includes(e.status)
-          ).length;
-          
-          setMetrics(prev => ({
-            ...prev,
-            activeEmergencies,
-          }));
-        }
-      } catch (err) {
-        console.error('Load emergencies error:', err);
+      setLoading(true);
+      // Load Metrics
+      const statsRes = await api.get('/api/emergency/admin/stats');
+      if (statsRes.data.success) {
+        setMetrics(statsRes.data.metrics);
       }
 
-      // For now, drivers list would need a separate admin endpoint
-      // setDrivers([]);
-      
-      setMetrics(prev => ({
-        ...prev,
-        availableDrivers: drivers.filter(d => d.status === 'available').length,
-      }));
+      // Load Recent Emergencies
+      const emergenciesRes = await api.get('/api/emergency/admin/all');
+      if (emergenciesRes.data.success) {
+        setEmergencies(emergenciesRes.data.emergencies);
+      }
+
+      // Load All Drivers
+      const driversRes = await api.get('/api/driver/admin/all');
+      if (driversRes.data.success) {
+        setDrivers(driversRes.data.drivers);
+      }
+      setLoading(false);
     } catch (error) {
       console.error('Load dashboard error:', error);
+      setLoading(false);
     }
   };
 
@@ -188,17 +178,16 @@ export default function AdminDashboard() {
                           </p>
                         </div>
                         <span
-                          className={`px-2 py-1 rounded text-xs font-semibold ${
-                            emergency.status === 'searching'
+                          className={`px-2 py-1 rounded text-xs font-semibold ${emergency.status === 'searching'
                               ? 'bg-yellow-100 text-yellow-800'
                               : emergency.status === 'assigned'
-                              ? 'bg-blue-100 text-blue-800'
-                              : emergency.status === 'enroute'
-                              ? 'bg-purple-100 text-purple-800'
-                              : emergency.status === 'completed'
-                              ? 'bg-green-100 text-green-800'
-                              : 'bg-red-100 text-red-800'
-                          }`}
+                                ? 'bg-blue-100 text-blue-800'
+                                : emergency.status === 'enroute'
+                                  ? 'bg-purple-100 text-purple-800'
+                                  : emergency.status === 'completed'
+                                    ? 'bg-green-100 text-green-800'
+                                    : 'bg-red-100 text-red-800'
+                            }`}
                         >
                           {emergency.status}
                         </span>
@@ -236,13 +225,12 @@ export default function AdminDashboard() {
                           <p className="text-xs text-gray-600">{driver.vehicleNo}</p>
                         </div>
                         <span
-                          className={`px-2 py-1 rounded text-xs font-semibold ${
-                            driver.status === 'available'
+                          className={`px-2 py-1 rounded text-xs font-semibold ${driver.status === 'available'
                               ? 'bg-green-100 text-green-800'
                               : driver.status === 'busy'
-                              ? 'bg-red-100 text-red-800'
-                              : 'bg-gray-100 text-gray-800'
-                          }`}
+                                ? 'bg-red-100 text-red-800'
+                                : 'bg-gray-100 text-gray-800'
+                            }`}
                         >
                           {driver.status}
                         </span>
