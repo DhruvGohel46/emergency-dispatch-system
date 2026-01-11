@@ -319,6 +319,15 @@ exports.redispatch = async (emergencyId) => {
       { upsert: true }
     );
 
+    // 🚨 ROOT CAUSE #1 FIX: Notify all drivers that emergency is searching again
+    const io = getIO();
+    if (io) {
+      io.to("drivers").emit("emergency:searching", {
+        emergencyId: emergencyId.toString(),
+        timestamp: new Date().toISOString(),
+      });
+    }
+
     // Start new dispatch (will search with expanded radius automatically)
     return await exports.start(emergency);
   } catch (error) {

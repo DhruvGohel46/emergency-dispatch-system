@@ -35,8 +35,8 @@ redisClient.on("ready", () => {
 
 redisClient.on("error", (err) => {
   console.error("❌ Redis connection error:", err.message);
+  console.warn("💡 Tip: Redis is optional. If you want caching, ensure Redis is installed and running.");
   // Don't exit process - Redis is optional for this system
-  // Application can run without Redis (fallback to MongoDB for geo queries)
 });
 
 redisClient.on("reconnecting", () => {
@@ -48,13 +48,15 @@ redisClient.on("end", () => {
 });
 
 // Connect to Redis (non-blocking - errors handled by event listeners)
-(async () => {
+// If Redis is not available, the app will still work (graceful degradation)
+// Make Redis truly optional - don't block app startup
+setTimeout(async () => {
   try {
     await redisClient.connect();
   } catch (error) {
-    // Connection will be retried automatically via reconnectStrategy
-    console.warn("⚠️  Redis: Initial connection failed, will retry:", error.message);
+    // Redis is optional - app continues without it
+    console.warn("⚠️  Redis: Optional service unavailable. App continues without Redis caching.");
   }
-})();
+}, 1000); // Delay connection to not block app startup
 
 module.exports = redisClient;

@@ -284,6 +284,63 @@ exports.transfer = async (req, res) => {
       });
     }
 
+    const previousDriverId = emergency.assignedDriverId;
+    let newLat = emergency.lat;
+    let newLng = emergency.lng;
+    let locationSource = "original_emergency_location";
+
+    // 🚨 PART 2: Use driver's CURRENT GPS location if ambulance breaks down mid-route
+    const { useCurrentLocation = true } = req.body;
+    if (useCurrentLocation && previousDriverId) {
+      try {
+        const GpsLog = require("../models/GpsLog");
+        const Driver = require("../models/Driver");
+
+        // Get driver's last GPS log for this emergency
+        const lastGpsLog = await GpsLog.findOne({
+          driverId: previousDriverId,
+          emergencyId: emergencyId,
+        })
+          .sort({ createdAt: -1 })
+          .lean();
+
+        // If GPS log exists, use that location
+        if (lastGpsLog && lastGpsLog.lat && lastGpsLog.lng) {
+          newLat = lastGpsLog.lat;
+          newLng = lastGpsLog.lng;
+          locationSource = "driver_current_location";
+          console.log(`📍 Transfer: Using driver's current GPS location (${newLat}, ${newLng}) from GpsLog`);
+        } else {
+          // Fallback: Use driver's current location from Driver model
+          const driver = await Driver.findById(previousDriverId);
+          if (driver && driver.lat && driver.lng) {
+            newLat = driver.lat;
+            newLng = driver.lng;
+            locationSource = "driver_last_seen_location";
+            console.log(`📍 Transfer: Using driver's last seen location (${newLat}, ${newLng}) from Driver model`);
+          }
+        }
+      } catch (gpsError) {
+        console.error("⚠️  Failed to get driver GPS location, using original emergency location:", gpsError.message);
+      }
+    }
+
+    // Log transfer event with location source
+    await eventLogger.logEvent({
+      emergencyId,
+      type: "TRANSFERRED",
+      actor: req.user?.role || "system",
+      actorId: req.user?.id || null,
+      message: reason || "Emergency transfer requested",
+      metadata: {
+        reason,
+        previousDriverId,
+        originalLocation: { lat: emergency.lat, lng: emergency.lng },
+        newLocation: { lat: newLat, lng: newLng },
+        locationSource,
+      },
+    });
+
     // Update current assignment to failed
     const Assignment = require("../models/Assignment");
     await Assignment.updateMany(
@@ -294,20 +351,22 @@ exports.transfer = async (req, res) => {
       }
     );
 
+    // Store original location before update
+    const originalLat = emergency.lat;
+    const originalLng = emergency.lng;
+
+    // Update emergency location to current ambulance position (if different)
+    if (newLat !== originalLat || newLng !== originalLng) {
+      emergency.lat = newLat;
+      emergency.lng = newLng;
+      emergency.notes = `${emergency.notes || ""}\n[TRANSFER] ${reason || "No reason provided"} - Location updated to ambulance's current position: ${newLat}, ${newLng}`.trim();
+      console.log(`✅ Emergency location updated from (${originalLat}, ${originalLng}) to (${newLat}, ${newLng})`);
+    }
+
     // Reset emergency status
     emergency.status = "searching";
     emergency.assignedDriverId = null;
     await emergency.save();
-
-    // Log transfer event
-    await eventLogger.logEvent({
-      emergencyId,
-      type: "TRANSFERRED",
-      actor: req.user?.role || "system",
-      actorId: req.user?.id || null,
-      message: reason || "Emergency transfer requested",
-      metadata: { reason, previousDriverId: emergency.assignedDriverId },
-    });
 
     // Update metrics
     await EmergencyMetrics.findOneAndUpdate(
@@ -316,12 +375,38 @@ exports.transfer = async (req, res) => {
       { upsert: true }
     );
 
-    // Re-dispatch
+    // Re-dispatch from new location (emergency already updated with new coordinates)
     const dispatchResult = await dispatch.redispatch(emergencyId);
+
+    // 🚨 Notify user of transfer
+    const io = global.io;
+    if (io) {
+      // Notify user
+      io.to(`emergency:${emergencyId}`).emit(`emergency:${emergencyId}:status`, {
+        status: "searching",
+        message: "Transfer initiated. We are dispatching a new ambulance.",
+        timestamp: new Date().toISOString(),
+      });
+
+      // 🚨 ROOT CAUSE #1 FIX: Notify all drivers that emergency is searching again
+      io.to("drivers").emit("emergency:searching", {
+        emergencyId: emergencyId.toString(),
+        timestamp: new Date().toISOString(),
+      });
+    }
 
     res.json({
       success: true,
-      message: "Emergency re-dispatched",
+      message: "Emergency re-dispatched from ambulance's current location",
+      location: {
+        lat: newLat,
+        lng: newLng,
+        source: locationSource,
+        originalLocation: {
+          lat: originalLat,
+          lng: originalLng,
+        },
+      },
       dispatch: dispatchResult,
     });
   } catch (error) {

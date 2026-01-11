@@ -5,12 +5,12 @@
     PORT: process.env.PORT || 3000,
     
     // MongoDB
-    MONGODB_URI: process.env.MONGODB_URI || "mongodb://localhost:27017/ambulance-dispatch",
+    MONGODB_URI: process.env.MONGODB_URI || "mongodb://localhost:27017/SaHaay",
     
     // Redis
     REDIS_HOST: process.env.REDIS_HOST || "localhost",
     REDIS_PORT: process.env.REDIS_PORT || 6379,
-    REDIS_PASSWORD: process.env.REDIS_PASSWORD || "",
+    REDIS_PASSWORD: process.env.REDIS_PASSWORD || "varun1823c",
     
     // JWT
     JWT_SECRET: process.env.JWT_SECRET || "yayaya",
@@ -22,9 +22,16 @@
     TWILIO_PHONE_NUMBER: process.env.TWILIO_PHONE_NUMBER || "",
     
     // Google Maps
-    GOOGLE_MAPS_API_KEY: process.env.GOOGLE_MAPS_API_KEY || "AIzaSyAypq0tADpFCn-mpSGoydv0CKYqvk9mUeI",
+    GOOGLE_MAPS_API_KEY: process.env.GOOGLE_MAPS_API_KEY || "AIzaSyCNGhbWRLt3Ya-zse6GBYI2ko_-okEaemc",
     
     // SMS Gateway Alternative
     SMS_API_KEY: process.env.SMS_API_KEY || "",
-    SMS_API_URL: process.env.SMS_API_URL || ""
+    SMS_API_URL: process.env.SMS_API_URL || "",
+    
+    // Email Configuration (for traffic notifications)
+    EMAIL_HOST: process.env.EMAIL_HOST || "smtp.gmail.com",
+    EMAIL_PORT: process.env.EMAIL_PORT || 587,
+    EMAIL_USER: process.env.EMAIL_USER || "kushwahavarun86@gmail.com",
+    EMAIL_PASSWORD: process.env.EMAIL_PASSWORD || "zonfznjxynixgtkt",
+    EMAIL_FROM: process.env.EMAIL_FROM || "SaHaay Emergency kushwahavarun86@gmail.com"
   };

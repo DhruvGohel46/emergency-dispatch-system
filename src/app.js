@@ -30,12 +30,14 @@ const authRoutes = require("./routes/auth.routes");
 const emergencyRoutes = require("./routes/emergency.routes");
 const driverRoutes = require("./routes/driver.routes");
 const smsRoutes = require("./routes/sms.routes");
+const trafficRoutes = require("./routes/traffic.routes");
 
 // Routes
 app.use("/api/auth", authRoutes);
 app.use("/api/emergency", emergencyRoutes);
 app.use("/api/driver", driverRoutes);
 app.use("/api/sms", smsRoutes);
+app.use("/api/traffic", trafficRoutes);
 
 // Health check
 app.get("/health", (req, res) => {

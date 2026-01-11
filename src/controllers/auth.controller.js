@@ -16,17 +16,22 @@ exports.login = async (req, res) => {
       });
     }
 
-    // Find user
+    // Find user/driver based on role
     let user = null;
+    let actualRole = role;
+
     if (role === "driver") {
+      // For driver login, ONLY check Driver collection
       user = await Driver.findOne({ phone });
       if (!user) {
         return res.status(404).json({
           success: false,
-          message: "Driver not found. Please register first.",
+          message: "Driver not found. Please register as driver first.",
         });
       }
+      actualRole = "driver"; // Force driver role
     } else {
+      // For user login, check User collection
       user = await User.findOne({ phone });
       if (!user) {
         return res.status(404).json({
@@ -34,25 +39,26 @@ exports.login = async (req, res) => {
           message: "User not found. Please register first.",
         });
       }
+      actualRole = user.role || "user";
     }
 
-    // Generate JWT token
+    // Generate JWT token with correct role
     const tokenPayload = {
       id: user._id.toString(),
       phone: user.phone,
-      role: role === "driver" ? "driver" : user.role || "user",
-      ...(role === "driver" && { driverId: user._id.toString() }),
+      role: actualRole,
+      ...(actualRole === "driver" && { driverId: user._id.toString() }),
     };
 
     const token = generateToken(tokenPayload);
 
-    // Prepare response data
+    // Prepare response data based on actual role
     const responseData = {
       id: user._id,
       name: user.name,
       phone: user.phone,
-      role: role === "driver" ? "driver" : user.role,
-      ...(role === "driver" && {
+      role: actualRole,
+      ...(actualRole === "driver" && {
         vehicleNo: user.vehicleNo,
         status: user.status,
         rating: user.rating,

@@ -37,10 +37,25 @@ exports.getRoute = async (originLat, originLng, destLat, destLng) => {
         polyline: route.overview_polyline.points,
         steps: leg.steps.map((step) => ({
           instruction: step.html_instructions,
-          distance: step.distance.value,
-          duration: step.duration.value,
-          startLocation: step.start_location,
-          endLocation: step.end_location,
+          html_instructions: step.html_instructions, // For traffic notification service
+          distance: {
+            value: step.distance.value,
+            text: step.distance.text,
+          },
+          duration: {
+            value: step.duration.value,
+            text: step.duration.text,
+          },
+          startLocation: {
+            lat: step.start_location.lat,
+            lng: step.start_location.lng,
+          },
+          endLocation: {
+            lat: step.end_location.lat,
+            lng: step.end_location.lng,
+          },
+          start_location: step.start_location, // For traffic notification compatibility
+          end_location: step.end_location,
         })),
       };
     } else {

@@ -15,7 +15,7 @@ const driverSchema = new mongoose.Schema({
   vehicleNo: {
     type: String,
     required: true,
-    unique: true,
+    unique: true, // Creates index automatically
     trim: true,
     uppercase: true,
   },
@@ -77,6 +77,6 @@ const driverSchema = new mongoose.Schema({
 // Geospatial index for location queries
 driverSchema.index({ lat: 1, lng: 1 });
 driverSchema.index({ status: 1 });
-driverSchema.index({ vehicleNo: 1 });
+// vehicleNo index is already created by unique: true, but we keep explicit index for compound queries if needed
 
 module.exports = mongoose.model("Driver", driverSchema);

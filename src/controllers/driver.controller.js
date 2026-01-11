@@ -8,6 +8,7 @@ const routing = require("../services/routing.service");
 const dispatch = require("../services/dispatch.service");
 const eventLogger = require("../utils/eventLogger");
 const messageLogger = require("../utils/messageLogger");
+const trafficNotification = require("../services/trafficNotification.service");
 
 // Get io instance from global or app locals
 const getIO = () => {
@@ -73,10 +74,10 @@ exports.register = async (req, res) => {
  */
 exports.updateLocation = async (req, res) => {
   try {
-    const { driverId, lat, lng, emergencyId } = req.body;
+    const { lat, lng, emergencyId } = req.body;
 
-    // Use driverId from auth middleware if available
-    const actualDriverId = req.driverId || driverId;
+    // Use driverId from auth middleware (set by verifyDriver)
+    const actualDriverId = req.driverId;
 
     if (!actualDriverId || lat === undefined || lng === undefined) {
       return res.status(400).json({
@@ -152,12 +153,15 @@ exports.updateLocation = async (req, res) => {
  */
 exports.updateStatus = async (req, res) => {
   try {
-    const { driverId, status } = req.body;
+    const { status } = req.body;
+
+    // Get driverId from JWT token (set by verifyDriver middleware)
+    const driverId = req.driverId;
 
     if (!driverId || !status) {
       return res.status(400).json({
         success: false,
-        message: "Driver ID and status are required",
+        message: "Status is required",
       });
     }
 
@@ -214,12 +218,15 @@ exports.updateStatus = async (req, res) => {
  */
 exports.accept = async (req, res) => {
   try {
-    const { driverId, emergencyId } = req.body;
+    const { emergencyId } = req.body;
+
+    // Get driverId from JWT token (set by verifyDriver middleware)
+    const driverId = req.driverId;
 
     if (!driverId || !emergencyId) {
       return res.status(400).json({
         success: false,
-        message: "Driver ID and Emergency ID are required",
+        message: "Emergency ID is required",
       });
     }
 
@@ -314,18 +321,46 @@ exports.accept = async (req, res) => {
     // Get ETA for user notification
     const driver = await Driver.findById(driverId);
     let eta = null;
+    let route = null;
+    let trafficNotifications = [];
+
     if (driver && emergency) {
       try {
-        eta = await routing.getETA(
+        // Get route with steps for traffic notification
+        route = await routing.getRoute(
           driver.lat,
           driver.lng,
           emergency.lat,
           emergency.lng
         );
 
+        // Calculate ETA from route
+        eta = {
+          distance: route.distance,
+          duration: route.duration,
+          estimatedMinutes: Math.ceil(route.duration / 60),
+          eta: new Date(Date.now() + route.duration * 1000).toISOString(),
+        };
+
+        // 🚨 TRAFFIC NOTIFICATION SYSTEM: Process route and send checkpoint emails
+        if (route && route.steps && route.steps.length > 0) {
+          try {
+            trafficNotifications = await trafficNotification.processRouteAndNotify(
+              route,
+              emergency,
+              driver,
+              eta
+            );
+            console.log(`✅ Sent ${trafficNotifications.filter(n => n.success).length} traffic notifications`);
+          } catch (trafficError) {
+            console.error("⚠️  Traffic notification failed:", trafficError.message);
+            // Don't fail the acceptance if traffic notification fails
+          }
+        }
+
         // Send SMS confirmation to user
         const smsResult = await sms.sendUserConfirmation(emergency.userPhone, driver, eta);
-        
+
         // Log SMS message
         if (smsResult.success) {
           await messageLogger.logMessage({
@@ -347,6 +382,14 @@ exports.accept = async (req, res) => {
     // Emit acceptance via WebSocket (improved room management)
     const io = getIO();
     if (io) {
+      // 🚨 ROOT CAUSE #3 FIX: Emit status change to user FIRST
+      io.to(`emergency:${emergencyId}`).emit(`emergency:${emergencyId}:status`, {
+        status: "assigned",
+        emergencyId,
+        driverId,
+        timestamp: new Date().toISOString(),
+      });
+
       // Emit to emergency-specific room
       io.to(`emergency:${emergencyId}`).emit(`emergency:${emergencyId}:assigned`, {
         driverId,
@@ -357,6 +400,12 @@ exports.accept = async (req, res) => {
         },
         eta,
         timestamp: new Date().toISOString(),
+      });
+
+      // 🚨 SYNC: Notify all drivers that this emergency is taken
+      io.to("drivers").emit("emergency:assigned", {
+        emergencyId,
+        driverId,
       });
 
       // Log WebSocket message
@@ -385,6 +434,16 @@ exports.accept = async (req, res) => {
         assignedDriverId: emergency.assignedDriverId,
       },
       eta,
+      trafficNotifications: {
+        sent: trafficNotifications.filter(n => n.success).length,
+        total: trafficNotifications.length,
+        checkpoints: trafficNotifications.map(n => ({
+          checkpoint: n.checkpoint,
+          authority: n.authority,
+          email: n.email,
+          success: n.success,
+        })),
+      },
     });
   } catch (error) {
     console.error("❌ Accept assignment error:", error);
@@ -401,15 +460,15 @@ exports.accept = async (req, res) => {
  */
 exports.reject = async (req, res) => {
   try {
-    const { driverId, emergencyId, reason } = req.body;
+    const { emergencyId, reason } = req.body;
 
-    // Use driverId from auth middleware if available
-    const actualDriverId = req.driverId || driverId;
+    // Get driverId from JWT token (set by verifyDriver middleware)
+    const actualDriverId = req.driverId;
 
     if (!actualDriverId || !emergencyId) {
       return res.status(400).json({
         success: false,
-        message: "Driver ID and Emergency ID are required",
+        message: "Emergency ID is required",
       });
     }
 
@@ -466,13 +525,59 @@ exports.reject = async (req, res) => {
 };
 
 /**
- * Get driver assignments
+ * Get current driver's assignments (uses JWT token)
+ */
+exports.getMyAssignments = async (req, res) => {
+  try {
+    // Get driverId from JWT token (set by verifyDriver middleware)
+    const driverId = req.driverId;
+
+    if (!driverId) {
+      return res.status(400).json({
+        success: false,
+        message: "Driver ID not found in token",
+      });
+    }
+
+    const assignments = await Assignment.find({ driverId })
+      .populate("emergencyId", "lat lng userPhone status address createdAt")
+      .sort({ createdAt: -1 })
+      .limit(50)
+      .lean();
+
+    res.json({
+      success: true,
+      count: assignments.length,
+      assignments,
+    });
+  } catch (error) {
+    console.error("❌ Get my assignments error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to get assignments",
+      error: error.message,
+    });
+  }
+};
+
+/**
+ * Get driver assignments by ID (admin access)
  */
 exports.getAssignments = async (req, res) => {
   try {
     const { driverId } = req.params;
 
-    const assignments = await Assignment.find({ driverId })
+    // If driverId in params, use it; otherwise use from token
+    const actualDriverId = driverId || req.driverId;
+
+    if (!actualDriverId) {
+      return res.status(400).json({
+        success: false,
+        message: "Driver ID is required",
+      });
+    }
+
+    const assignments = await Assignment.find({ driverId: actualDriverId })
       .populate("emergencyId", "lat lng userPhone status address createdAt")
       .sort({ createdAt: -1 })
       .limit(50)
@@ -550,7 +655,7 @@ exports.getProfile = async (req, res) => {
       statistics: {
         assignments: assignmentStats,
         totalTrips: driver.totalTrips,
-        cancellationRate: driver.totalTrips > 0 
+        cancellationRate: driver.totalTrips > 0
           ? ((driver.totalCancellations / driver.totalTrips) * 100).toFixed(2) + "%"
           : "0%",
       },
@@ -584,13 +689,13 @@ exports.getCurrentDriverProfile = async (req, res) => {
     // Get driver statistics
     const Assignment = require("../models/Assignment");
     const totalAssignments = await Assignment.countDocuments({ driverId: driver._id });
-    const pendingAssignments = await Assignment.countDocuments({ 
-      driverId: driver._id, 
-      status: "pending" 
+    const pendingAssignments = await Assignment.countDocuments({
+      driverId: driver._id,
+      status: "pending"
     });
-    const completedAssignments = await Assignment.countDocuments({ 
-      driverId: driver._id, 
-      status: "completed" 
+    const completedAssignments = await Assignment.countDocuments({
+      driverId: driver._id,
+      status: "completed"
     });
 
     res.json({
@@ -618,7 +723,7 @@ exports.getCurrentDriverProfile = async (req, res) => {
         totalAssignments,
         pendingAssignments,
         completedAssignments,
-        cancellationRate: driver.totalTrips > 0 
+        cancellationRate: driver.totalTrips > 0
           ? ((driver.totalCancellations / driver.totalTrips) * 100).toFixed(2) + "%"
           : "0%",
       },

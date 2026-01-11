@@ -9,7 +9,7 @@ const userSchema = new mongoose.Schema({
   phone: {
     type: String,
     required: true,
-    unique: true,
+    unique: true, // Creates index automatically
     trim: true,
   },
   role: {
@@ -21,8 +21,7 @@ const userSchema = new mongoose.Schema({
   timestamps: true,
 });
 
-// Index for faster phone lookups
-userSchema.index({ phone: 1 });
+// Index for role queries (phone already indexed by unique: true)
 userSchema.index({ role: 1 });
 
 module.exports = mongoose.model("User", userSchema);

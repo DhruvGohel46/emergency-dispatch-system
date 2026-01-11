@@ -21,7 +21,10 @@ router.post("/reject", verifyDriver, driverController.reject);
 // Get current driver profile (auth required) - MUST be before /:driverId route
 router.get("/me", verifyDriver, driverController.getCurrentDriverProfile);
 
-// Get driver assignments (auth required)
+// Get current driver's assignments (auth required - uses JWT token)
+router.get("/me/assignments", verifyDriver, driverController.getMyAssignments);
+
+// Get driver assignments by ID (auth required - for admin access)
 router.get("/:driverId/assignments", verifyDriver, driverController.getAssignments);
 
 // Get driver profile by ID (public) - MUST be last
