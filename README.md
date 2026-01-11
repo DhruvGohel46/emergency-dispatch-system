@@ -288,6 +288,8 @@ And replaces it with:
 
 It turns ambulances into a **coordinated emergency network**, not isolated vehicles.
 
+This is integration of offline DSM-SMS system :  https://github.com/Ahad-Dngwala/SAHAAY.github.io
+
 ---
 
 # Final Statement
