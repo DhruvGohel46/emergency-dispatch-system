@@ -30,7 +30,7 @@ In the Golden Hour, certainty saves lives. Yet, India's current infrastructure r
 
 ---
 
-## 🧠 Autonomous Architecture
+## Autonomous Architecture
 
 SaHaay replaces human guesswork with intelligent orchestration. The system autonomously manages the entire lifecycle of an emergency—from detection to hospital admission.
 
